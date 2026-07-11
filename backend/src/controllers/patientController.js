@@ -1,15 +1,28 @@
 const pool = require("../config/db");
 
-// GET all patients
+// GET all patients in queue priority order
 const getPatients = async (req, res) => {
   try {
-    const result = await pool.query(
-      "SELECT * FROM patients ORDER BY token_number"
-    );
+    const result = await pool.query(`
+      SELECT *
+      FROM patients
+      ORDER BY
+        CASE
+          WHEN status = 'waiting' THEN 1
+          WHEN status = 'in_progress' THEN 2
+          WHEN status = 'completed' THEN 3
+          ELSE 4
+        END,
+        CASE
+          WHEN status = 'waiting' THEN severity
+        END DESC,
+        token_number ASC
+    `);
 
-    res.json(result.rows);
+    res.status(200).json(result.rows);
   } catch (error) {
-    console.error(error);
+    console.error("Error fetching patients:", error);
+
     res.status(500).json({
       message: "Error fetching patients",
     });
@@ -21,110 +34,66 @@ const addPatient = async (req, res) => {
   try {
     const { full_name, age, symptoms, severity } = req.body;
 
+    if (!full_name || !age || !symptoms || !severity) {
+      return res.status(400).json({
+        message: "Please fill in all patient details",
+      });
+    }
+
+    // Find the next token number
+    const tokenResult = await pool.query(`
+      SELECT COALESCE(MAX(token_number), 0) + 1 AS next_token
+      FROM patients
+    `);
+
+    const nextToken = tokenResult.rows[0].next_token;
+
     const result = await pool.query(
-      `INSERT INTO patients
-      (full_name, age, symptoms, severity)
-      VALUES ($1, $2, $3, $4)
-      RETURNING *`,
-      [full_name, age, symptoms, severity]
+      `
+      INSERT INTO patients
+      (
+        full_name,
+        age,
+        symptoms,
+        severity,
+        status,
+        token_number
+      )
+      VALUES ($1, $2, $3, $4, 'waiting', $5)
+      RETURNING *
+      `,
+      [full_name, age, symptoms, severity, nextToken]
     );
 
     res.status(201).json(result.rows[0]);
   } catch (error) {
-    console.error(error);
+    console.error("Error adding patient:", error);
+
     res.status(500).json({
       message: "Error adding patient",
     });
   }
 };
 
-const ALLOWED_STATUSES = ["waiting", "in_progress", "completed"];
-
-// UPDATE an existing patient (full edit and/or status transition)
+// UPDATE patient details
 const updatePatient = async (req, res) => {
   try {
     const { id } = req.params;
-    const { full_name, age, symptoms, severity, status } = req.body;
 
-    const fields = [];
-    const values = [];
-    let paramIndex = 1;
-
-    // full_name: only validate/update if provided
-    if (full_name !== undefined) {
-      if (typeof full_name !== "string" || full_name.trim().length === 0) {
-        return res.status(400).json({
-          message: "full_name must not be empty",
-        });
-      }
-      fields.push(`full_name = $${paramIndex++}`);
-      values.push(full_name);
-    }
-
-    // age: only validate/update if provided
-    if (age !== undefined) {
-      if (typeof age !== "number" || Number.isNaN(age) || age <= 0) {
-        return res.status(400).json({
-          message: "age must be a positive number",
-        });
-      }
-      fields.push(`age = $${paramIndex++}`);
-      values.push(age);
-    }
-
-    // symptoms: only validate/update if provided
-    if (symptoms !== undefined) {
-      if (typeof symptoms !== "string" || symptoms.trim().length === 0) {
-        return res.status(400).json({
-          message: "symptoms must not be empty",
-        });
-      }
-      fields.push(`symptoms = $${paramIndex++}`);
-      values.push(symptoms);
-    }
-
-    // severity: only validate/update if provided
-    if (severity !== undefined) {
-      if (
-        typeof severity !== "number" ||
-        !Number.isInteger(severity) ||
-        severity < 1 ||
-        severity > 5
-      ) {
-        return res.status(400).json({
-          message: "severity must be an integer between 1 and 5",
-        });
-      }
-      fields.push(`severity = $${paramIndex++}`);
-      values.push(severity);
-    }
-
-    // status: only validate/update if provided
-    if (status !== undefined) {
-      if (!ALLOWED_STATUSES.includes(status)) {
-        return res.status(400).json({
-          message: `status must be one of: ${ALLOWED_STATUSES.join(", ")}`,
-        });
-      }
-      fields.push(`status = $${paramIndex++}`);
-      values.push(status);
-    }
-
-    // At least one field must be present
-    if (fields.length === 0) {
-      return res.status(400).json({
-        message: "At least one field must be provided to update",
-      });
-    }
-
-    values.push(id);
+    const { full_name, age, symptoms, severity } = req.body;
 
     const result = await pool.query(
-      `UPDATE patients
-      SET ${fields.join(", ")}
-      WHERE id = $${paramIndex}
-      RETURNING *`,
-      values
+      `
+      UPDATE patients
+      SET
+        full_name = $1,
+        age = $2,
+        symptoms = $3,
+        severity = $4
+      WHERE id = $5
+      RETURNING *
+      `,
+      [full_name, age, symptoms, severity, id]
     );
 
     if (result.rows.length === 0) {
@@ -135,9 +104,55 @@ const updatePatient = async (req, res) => {
 
     res.status(200).json(result.rows[0]);
   } catch (error) {
-    console.error(error);
+    console.error("Error updating patient:", error);
+
     res.status(500).json({
       message: "Error updating patient",
+    });
+  }
+};
+
+// UPDATE patient status
+const updatePatientStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { status } = req.body;
+
+    const allowedStatuses = [
+      "waiting",
+      "in_progress",
+      "completed",
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        message: "Invalid patient status",
+      });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE patients
+      SET status = $1
+      WHERE id = $2
+      RETURNING *
+      `,
+      [status, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: "Patient not found",
+      });
+    }
+
+    res.status(200).json(result.rows[0]);
+  } catch (error) {
+    console.error("Error updating patient status:", error);
+
+    res.status(500).json({
+      message: "Error updating patient status",
     });
   }
 };
@@ -148,7 +163,11 @@ const deletePatient = async (req, res) => {
     const { id } = req.params;
 
     const result = await pool.query(
-      "DELETE FROM patients WHERE id = $1 RETURNING *",
+      `
+      DELETE FROM patients
+      WHERE id = $1
+      RETURNING *
+      `,
       [id]
     );
 
@@ -158,21 +177,24 @@ const deletePatient = async (req, res) => {
       });
     }
 
-    res.json({
+    res.status(200).json({
       message: "Patient deleted successfully",
       patient: result.rows[0],
     });
   } catch (error) {
-    console.error(error);
+    console.error("Error deleting patient:", error);
+
     res.status(500).json({
       message: "Error deleting patient",
     });
   }
 };
 
+// Export every controller function
 module.exports = {
   getPatients,
   addPatient,
   updatePatient,
+  updatePatientStatus,
   deletePatient,
 };
