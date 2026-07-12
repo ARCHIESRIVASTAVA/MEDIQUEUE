@@ -1,7 +1,7 @@
 import axios from "axios";
 
 const axiosClient = axios.create({
-  baseURL: "http://localhost:5000",
+  baseURL: "https://mediqueue-wf8j.onrender.com/api",
   headers: {
     "Content-Type": "application/json",
   },
