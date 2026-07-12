@@ -192,6 +192,46 @@ app.delete("/api/patients/:id", async (req, res) => {
 
 // Use Render's port in deployment
 const PORT = process.env.PORT || 5000;
+// Update patient status when "Call Patient" is clicked
+app.patch("/api/patients/:id/status", async (req, res) => {
+  try {
+    const patientId = req.params.id;
+    const { status } = req.body;
+
+    if (!status) {
+      return res.status(400).json({
+        message: "Status is required",
+      });
+    }
+
+    const result = await pool.query(
+      `UPDATE patients
+       SET status = $1
+       WHERE id = $2
+       RETURNING *`,
+      [status, patientId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: "Patient not found",
+      });
+    }
+
+    res.status(200).json({
+      message: "Patient status updated successfully",
+      patient: result.rows[0],
+    });
+
+  } catch (error) {
+    console.error("Error updating patient status:", error);
+
+    res.status(500).json({
+      message: "Patient status could not be updated",
+      error: error.message,
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
