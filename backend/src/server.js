@@ -75,7 +75,7 @@ app.post("/api/patients", async (req, res) => {
       age,
       symptoms,
       severity,
-      status = "Waiting"
+      status = "waiting"
     } = req.body;
 
     if (
