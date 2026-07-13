@@ -232,6 +232,73 @@ app.patch("/api/patients/:id/status", async (req, res) => {
     });
   }
 });
+// UPDATE COMPLETE PATIENT DETAILS
+
+app.put("/api/patients/:id", async (req, res) => {
+  try {
+    const patientId = req.params.id;
+
+    const {
+      full_name,
+      age,
+      symptoms,
+      severity
+    } = req.body;
+
+    if (
+      !full_name ||
+      !age ||
+      !symptoms ||
+      !severity
+    ) {
+      return res.status(400).json({
+        message: "All patient details are required"
+      });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE patients
+      SET
+        full_name = $1,
+        age = $2,
+        symptoms = $3,
+        severity = $4
+      WHERE id = $5
+      RETURNING *
+      `,
+      [
+        full_name,
+        Number(age),
+        symptoms,
+        Number(severity),
+        patientId
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: "Patient not found"
+      });
+    }
+
+    res.status(200).json({
+      message: "Patient details updated successfully",
+      patient: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error(
+      "Error updating patient:",
+      error
+    );
+
+    res.status(500).json({
+      message: "Patient details could not be updated",
+      error: error.message
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
