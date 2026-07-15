@@ -7,16 +7,16 @@ dotenv.config();
 
 const app = express();
 
-// Allow both local frontend and deployed Vercel frontend
+// Allow local frontend and deployed Vercel frontend
 app.use(
   cors({
     origin: [
       "http://localhost:5173",
-      "https://mediqueue-cyan.vercel.app"
+      "https://mediqueue-cyan.vercel.app",
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true
+    credentials: true,
   })
 );
 
@@ -26,48 +26,61 @@ app.use(express.json());
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false
-  }
+    rejectUnauthorized: false,
+  },
 });
 
-// Home route: checks backend and database connection
+// HOME ROUTE
+// Checks whether backend and database are working
 app.get("/", async (req, res) => {
   try {
     await pool.query("SELECT NOW()");
 
-    res.status(200).json({
+    return res.status(200).json({
       message: "Connected to PostgreSQL!",
-      time: new Date().toISOString()
+      time: new Date().toISOString(),
     });
   } catch (error) {
     console.error("Database connection error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Database connection failed",
-      error: error.message
+      error: error.message,
     });
   }
 });
 
-// Get all patients
+// GET ALL PATIENTS
 app.get("/api/patients", async (req, res) => {
   try {
-    const result = await pool.query(
-      "SELECT * FROM patients ORDER BY token_number ASC"
-    );
+    const result = await pool.query(`
+      SELECT *
+      FROM patients
+      ORDER BY
+        CASE
+          WHEN status = 'waiting' THEN 1
+          WHEN status = 'in_progress' THEN 2
+          WHEN status = 'completed' THEN 3
+          ELSE 4
+        END,
+        CASE
+          WHEN status = 'waiting' THEN severity
+        END DESC,
+        token_number ASC
+    `);
 
-    res.status(200).json(result.rows);
+    return res.status(200).json(result.rows);
   } catch (error) {
     console.error("Error fetching patients:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Unable to fetch patients",
-      error: error.message
+      error: error.message,
     });
   }
 });
 
-// Add a new patient
+// ADD A NEW PATIENT
 app.post("/api/patients", async (req, res) => {
   try {
     const {
@@ -75,184 +88,91 @@ app.post("/api/patients", async (req, res) => {
       age,
       symptoms,
       severity,
-      status = "waiting"
+      status = "waiting",
     } = req.body;
 
     if (
       !full_name ||
       age === undefined ||
+      age === "" ||
       !symptoms ||
-      severity === undefined
+      severity === undefined ||
+      severity === ""
     ) {
       return res.status(400).json({
         message:
-          "Full name, age, symptoms and severity are required"
+          "Full name, age, symptoms and severity are required",
       });
     }
 
     // Generate the next token number
-    const tokenResult = await pool.query(
-      "SELECT COALESCE(MAX(token_number), 0) + 1 AS next_token FROM patients"
-    );
+    const tokenResult = await pool.query(`
+      SELECT
+      COALESCE(MAX(token_number), 0) + 1
+      AS next_token
+      FROM patients
+    `);
 
     const nextToken = tokenResult.rows[0].next_token;
 
     const result = await pool.query(
-      `INSERT INTO patients
-      (full_name, age, symptoms, severity, status, token_number)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING *`,
-      [
+      `
+      INSERT INTO patients
+      (
         full_name,
         age,
         symptoms,
         severity,
         status,
-        nextToken
+        token_number
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+      `,
+      [
+        full_name.trim(),
+        Number(age),
+        symptoms.trim(),
+        Number(severity),
+        status,
+        nextToken,
       ]
     );
 
-    res.status(201).json(result.rows[0]);
+    return res.status(201).json(result.rows[0]);
   } catch (error) {
     console.error("Error adding patient:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Unable to add patient",
-      error: error.message
-    });
-  }
-});
-
-// Update patient status
-app.put("/api/patients/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (!status) {
-      return res.status(400).json({
-        message: "Patient status is required"
-      });
-    }
-
-    const result = await pool.query(
-      `UPDATE patients
-       SET status = $1
-       WHERE id = $2
-       RETURNING *`,
-      [status, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Patient not found"
-      });
-    }
-
-    res.status(200).json(result.rows[0]);
-  } catch (error) {
-    console.error("Error updating patient:", error);
-
-    res.status(500).json({
-      message: "Unable to update patient",
-      error: error.message
-    });
-  }
-});
-
-// Delete a patient
-app.delete("/api/patients/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await pool.query(
-      "DELETE FROM patients WHERE id = $1 RETURNING *",
-      [id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Patient not found"
-      });
-    }
-
-    res.status(200).json({
-      message: "Patient deleted successfully",
-      patient: result.rows[0]
-    });
-  } catch (error) {
-    console.error("Error deleting patient:", error);
-
-    res.status(500).json({
-      message: "Unable to delete patient",
-      error: error.message
-    });
-  }
-});
-
-// Use Render's port in deployment
-const PORT = process.env.PORT || 5000;
-// Update patient status when "Call Patient" is clicked
-app.patch("/api/patients/:id/status", async (req, res) => {
-  try {
-    const patientId = req.params.id;
-    const { status } = req.body;
-
-    if (!status) {
-      return res.status(400).json({
-        message: "Status is required",
-      });
-    }
-
-    const result = await pool.query(
-      `UPDATE patients
-       SET status = $1
-       WHERE id = $2
-       RETURNING *`,
-      [status, patientId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        message: "Patient not found",
-      });
-    }
-
-    res.status(200).json({
-      message: "Patient status updated successfully",
-      patient: result.rows[0],
-    });
-
-  } catch (error) {
-    console.error("Error updating patient status:", error);
-
-    res.status(500).json({
-      message: "Patient status could not be updated",
       error: error.message,
     });
   }
 });
-// UPDATE COMPLETE PATIENT DETAILS
 
+// UPDATE COMPLETE PATIENT DETAILS
+// This route is used by the Edit and Save buttons
 app.put("/api/patients/:id", async (req, res) => {
   try {
-    const patientId = req.params.id;
+    const { id } = req.params;
 
     const {
       full_name,
       age,
       symptoms,
-      severity
+      severity,
     } = req.body;
 
     if (
       !full_name ||
-      !age ||
+      age === undefined ||
+      age === "" ||
       !symptoms ||
-      !severity
+      severity === undefined ||
+      severity === ""
     ) {
       return res.status(400).json({
-        message: "All patient details are required"
+        message: "All patient details are required",
       });
     }
 
@@ -268,38 +188,128 @@ app.put("/api/patients/:id", async (req, res) => {
       RETURNING *
       `,
       [
-        full_name,
+        full_name.trim(),
         Number(age),
-        symptoms,
+        symptoms.trim(),
         Number(severity),
-        patientId
+        id,
       ]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({
-        message: "Patient not found"
+        message: "Patient not found",
       });
     }
 
-    res.status(200).json({
-      message: "Patient details updated successfully",
-      patient: result.rows[0]
-    });
-
+    return res.status(200).json(result.rows[0]);
   } catch (error) {
     console.error(
-      "Error updating patient:",
+      "Error updating patient details:",
       error
     );
 
-    res.status(500).json({
+    return res.status(500).json({
       message: "Patient details could not be updated",
-      error: error.message
+      error: error.message,
     });
   }
 });
 
+// UPDATE ONLY PATIENT STATUS
+// Used by Call Patient and Mark Completed
+app.patch(
+  "/api/patients/:id/status",
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const allowedStatuses = [
+        "waiting",
+        "in_progress",
+        "completed",
+      ];
+
+      if (!allowedStatuses.includes(status)) {
+        return res.status(400).json({
+          message: "Invalid patient status",
+        });
+      }
+
+      const result = await pool.query(
+        `
+        UPDATE patients
+        SET status = $1
+        WHERE id = $2
+        RETURNING *
+        `,
+        [status, id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Patient not found",
+        });
+      }
+
+      return res.status(200).json(
+        result.rows[0]
+      );
+    } catch (error) {
+      console.error(
+        "Error updating patient status:",
+        error
+      );
+
+      return res.status(500).json({
+        message:
+          "Patient status could not be updated",
+        error: error.message,
+      });
+    }
+  }
+);
+
+// DELETE A PATIENT
+app.delete("/api/patients/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `
+      DELETE FROM patients
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: "Patient not found",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Patient deleted successfully",
+      patient: result.rows[0],
+    });
+  } catch (error) {
+    console.error("Error deleting patient:", error);
+
+    return res.status(500).json({
+      message: "Unable to delete patient",
+      error: error.message,
+    });
+  }
+});
+
+// Start the backend server
+const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(
+    `Server is running on port ${PORT}`
+  );
 });
